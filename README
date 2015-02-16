@@ -1,0 +1,27 @@
+
+This XrdCl plugin provides a "lazy-download" mode for the Xrootd client.
+
+All files opened are downloaded into a local temporary directory as part of
+an unlinked temporary file.  As portions of the file are accessed, they are
+cached locally in 64MB chunks; subsequent accesses will be served from local
+disk / page cache instead of through the remote server.
+
+This effectively implements latency-hiding for the duration of the file
+processing, but does not cache across multiple runs.
+
+As the files are unlinked, the disk space will be cleaned up automatically
+if the XrdCl::File handle is closed (or the program crashes).
+
+This plug-in forbids writes and assumes that the files are immutable.
+
+Safety checks are included to make sure that the local disk space available
+is at least N GB
+
+TODO:
+- Review for thread safety; for now, assume thread-unsafe.
+- The minimum free space and the temporary directory selection should be
+  exposed as configuration variables.
+- Provide a "maximum disk space"; if the cached data goes above this level,
+  punch a hole in the file.
+- Have disk space usage be managed process-wide, not just per-file.
+
