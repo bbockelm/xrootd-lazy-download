@@ -1,0 +1,8 @@
+release_dir
+libXrdClLazyDownload.so
+install_manifest.txt
+config/lazy-download.conf
+cmake_install.cmake
+Makefile
+CMakeFiles
+CMakeCache.txt

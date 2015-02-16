@@ -1,0 +1,5 @@
+
+url = xrootd.unl.edu
+enable = true
+lib = @CMAKE_INSTALL_LIBDIR@/libXrdClLazyDownload.so
+
