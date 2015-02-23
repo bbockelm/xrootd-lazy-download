@@ -5,7 +5,7 @@
 #include <algorithm>
 
 #include <XrdVersion.hh>
-#include <XrdSys/XrdSysPthread.hh>
+#include <XrdSys/XrdSysAtomics.hh>
 
 #include "XrdClLazyDownload.hh"
 #include "LocalFileSystem.hh"
@@ -80,6 +80,9 @@ LDFile::SetSize(uint64_t size)
             m_fd = -1;
         }
     }
+    AtomicBeg(m_mutex);
+    AtomicCAS(m_is_open, false, true);
+    AtomicEnd(m_mutex);
 }
 
 
@@ -121,14 +124,14 @@ LDFile::Read(uint64_t                offset,
              XrdCl::ResponseHandler *handler,
              uint16_t                timeout)
 {
-    fprintf(stderr, "Starting read\n");
+    //fprintf(stderr, "Starting read\n");
     if (!UseCache())
     {
-        fprintf(stderr, "Not using cache.\n");
+        //fprintf(stderr, "Not using cache.\n");
         return m_fh.Read(offset, size, buffer, handler, timeout);
     }
     XrdCl::XRootDStatus status = cache(offset, offset+size, timeout);
-    fprintf(stderr, "Finished cache.\n");
+    //fprintf(stderr, "Finished cache.\n");
     if (!status.IsOK()) {return status;}
 
     int64_t nread = 0, nread_tmp = -1, len_tmp = size, start_tmp = offset;
@@ -147,7 +150,7 @@ LDFile::Read(uint64_t                offset,
     XrdCl::AnyObject *response = new XrdCl::AnyObject();
     XrdCl::ChunkInfo *info = new XrdCl::ChunkInfo(offset, size, buffer);
     response->Set(info);
-    fprintf(stderr, "Calling handler.\n");
+    //fprintf(stderr, "Calling handler.\n");
     handler->HandleResponseWithHosts(cbstatus, response, NULL);
     return XrdCl::XRootDStatus(XrdCl::stOK, XrdCl::suDone);
 }
@@ -239,6 +242,9 @@ LDFile::IsOpen() const
 bool
 LDFile::UseCache() const
 {
+    AtomicBeg(const_cast<LDFile*>(this)->m_mutex);
+    AtomicCAS(const_cast<LDFile*>(this)->m_is_open, false, true);
+    AtomicEnd(const_cast<LDFile*>(this)->m_mutex);
     return ((m_fd != -1) && (m_cacheSize != -1));
 }
 
@@ -275,7 +281,14 @@ LDFile::cache(uint64_t start, uint64_t end, uint16_t timeout)
         {
             len = m_size - start;
         }
-        if (!m_present[index])
+        bool is_present;
+        AtomicBeg(m_mutex);
+        is_present = AtomicGet(m_present[index]);
+        AtomicEnd(m_mutex);
+            // Note it is possible for two threads to race and both cache
+            // the chunk; since this is an idempotent operation (and only one
+            // will update m_present below), this is OK.
+        if (!is_present)
         {
             void *window = mmap(0, len, PROT_READ | PROT_WRITE, MAP_SHARED, m_fd, start);
             if (window == MAP_FAILED)
@@ -286,10 +299,10 @@ LDFile::cache(uint64_t start, uint64_t end, uint16_t timeout)
             uint32_t bytesRead = 0;
             XrdCl::XRootDStatus status;
             uint64_t len_tmp = len, start_tmp = start, nread_tmp = 0;
-            fprintf(stderr, "Issuing blocking cache read.\n");
+            //fprintf(stderr, "Issuing blocking cache read.\n");
             while ((status = m_fh.Read(start_tmp, len_tmp, (static_cast<char*>(window)+nread_tmp), bytesRead, timeout)).IsOK())
             {
-                fprintf(stderr, "Finished read of %d bytes.\n", bytesRead);
+                //fprintf(stderr, "Finished read of %d bytes.\n", bytesRead);
                 if (bytesRead == 0)
                 {
                     return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidOp, 1, "Read past end of file.");
@@ -303,12 +316,15 @@ LDFile::cache(uint64_t start, uint64_t end, uint16_t timeout)
             munmap(window, len);
             if (!status.IsOK()) {return status;}
 
-            m_present[index] = 1;
-            m_count++;
-            if (m_count == m_cacheSize)
+            AtomicBeg(m_mutex);
+            AtomicCAS(m_present[index], 0, 1);
+            int tmp_count;
+            AtomicFAdd(tmp_count, m_count, 1);
+            if (tmp_count+1 == m_cacheSize)
             {
-                m_fh.Close();;
+                m_fh.Close();
             }
+            AtomicEnd(m_mutex);
         }
         start += len;
         ++index;
@@ -519,26 +535,28 @@ m_min_free(2.0)
             }
         }
     }
+
+    // At some point in the future, we would periodically re-evaluate
+    // this decision.
+    {
+        XrdSysMutexHelper scopedLock(g_mutex);
+        m_temp_path = g_lfs.findCachePath(m_dirs, m_min_free);
+    }
 }
 
 
 XrdCl::FilePlugIn *
 PlugInFactory::CreateFile(const std::string & url)
 {
-    fprintf(stderr, "Creating new path for url %s.\n", url.c_str());
-    std::string temp_path;
-    {
-        XrdSysMutexHelper scopedLock(g_mutex);
-        g_lfs.findCachePath(m_dirs, m_min_free);
-    }
-    return static_cast<XrdCl::FilePlugIn *>(new LDFile(temp_path));
+    //fprintf(stderr, "Creating new path for url %s.\n", url.c_str());
+    return static_cast<XrdCl::FilePlugIn *>(new LDFile(m_temp_path));
 }
 
 
 XrdCl::FileSystemPlugIn *
 PlugInFactory::CreateFileSystem(const std::string &url_str)
 {
-    fprintf(stderr, "Creating new filesystem for url %s.\n", url_str.c_str());
+    //fprintf(stderr, "Creating new filesystem for url %s.\n", url_str.c_str());
     XrdCl::URL url(url_str);
     return static_cast<XrdCl::FileSystemPlugIn *>(new LDFileSystem(url));
 }
@@ -548,10 +566,10 @@ extern "C"
 {
 void *XrdClGetPlugIn(const void *arg)
 {
-    fprintf(stderr, "Returning new plugin factory.\n");
+    //fprintf(stderr, "Returning new plugin factory.\n");
     const std::map<std::string, std::string> &args = *static_cast<const std::map<std::string, std::string> *>(arg);
     void * myplugin = new XrdClLazyDownload::PlugInFactory(args);
-    fprintf(stderr, "New factory plugin at %p.\n", myplugin);
+    //fprintf(stderr, "New factory plugin at %p.\n", myplugin);
 
     return myplugin;
 }

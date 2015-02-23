@@ -1,6 +1,7 @@
 #ifndef XRD_CL_LAZY_DOWNLOAD_H
 #define XRD_CL_LAZY_DOWNLOAD_H
 
+#include <XrdSys/XrdSysPthread.hh>
 #include <XrdCl/XrdClPlugInInterface.hh>
 
 namespace XrdClLazyDownload
@@ -104,6 +105,7 @@ private:
     XrdCl::File m_fh;
     const std::string m_cache_dir;
     std::vector<bool> m_present;
+    XrdSysMutex m_mutex;
 };
 
 
@@ -210,6 +212,7 @@ private:
 
     double m_min_free;
     std::vector<std::string> m_dirs;
+    std::string m_temp_path;
 };
 
 };

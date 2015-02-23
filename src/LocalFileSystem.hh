@@ -25,7 +25,6 @@ private:
 
   std::vector<FSInfo *> fs_;
   std::vector<std::string> fstypes_;
-  std::string unusable_dir_warnings_;
 
   // undefined, no semantics
   LocalFileSystem(LocalFileSystem &);
