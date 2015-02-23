@@ -4,6 +4,11 @@
 #include <XrdSys/XrdSysPthread.hh>
 #include <XrdCl/XrdClPlugInInterface.hh>
 
+namespace XrdCl
+{
+    class Log;
+}
+
 namespace XrdClLazyDownload
 {
 
@@ -12,7 +17,7 @@ class LDFile : public XrdCl::FilePlugIn
 
 public:
 
-    LDFile(const std::string &cache_dir);
+    LDFile(const std::string &cache_dir, XrdCl::Log &log);
 
     virtual ~LDFile() {}
 
@@ -106,6 +111,7 @@ private:
     const std::string m_cache_dir;
     std::vector<bool> m_present;
     XrdSysMutex m_mutex;
+    XrdCl::Log &m_log;
 };
 
 
@@ -113,7 +119,7 @@ class LDFileSystem : public XrdCl::FileSystemPlugIn
 {
 public:
 
-    LDFileSystem(const XrdCl::URL &url);
+    LDFileSystem(const XrdCl::URL &url, XrdCl::Log &log);
 
     virtual ~LDFileSystem() {}
 
@@ -193,6 +199,7 @@ public:
 
 private:
     XrdCl::FileSystem m_fs;
+    XrdCl::Log &m_log;
 };
 
 
@@ -213,6 +220,7 @@ private:
     double m_min_free;
     std::vector<std::string> m_dirs;
     std::string m_temp_path;
+    XrdCl::Log &m_log;
 };
 
 };

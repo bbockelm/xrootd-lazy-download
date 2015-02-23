@@ -17,10 +17,14 @@ This plug-in forbids writes and assumes that the files are immutable.
 Safety checks are included to make sure that the local disk space available
 is at least N GB
 
+Plugins are installed into /etc/xrootd/plugins.conf.d.  However, if you want
+to test this from the build directory, you can run:
+
+XRD_PLUGINCONFDIR=~/path/to/release_dir/etc/xrootd/client.plugins.d \
+LD_LIBRARY_PATH=~/path/to/release_dir/lib64 \
+  xrdcp root://foo.example.com/some/file /tmp/bar
+
 TODO:
-- Review for thread safety; for now, assume thread-unsafe.
-- The minimum free space and the temporary directory selection should be
-  exposed as configuration variables.
 - Provide a "maximum disk space"; if the cached data goes above this level,
   punch a hole in the file.
 - Have disk space usage be managed process-wide, not just per-file.

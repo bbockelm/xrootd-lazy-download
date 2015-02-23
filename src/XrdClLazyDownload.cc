@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include <XrdVersion.hh>
+#include <XrdCl/XrdClDefaultEnv.hh>
 #include <XrdSys/XrdSysAtomics.hh>
 
 #include "XrdClLazyDownload.hh"
@@ -19,7 +20,7 @@ LocalFileSystem g_lfs;
 XrdSysMutex g_mutex;
 
 
-LDFile::LDFile(const std::string &cache_dir)
+LDFile::LDFile(const std::string &cache_dir, XrdCl::Log &log)
 :
   m_is_open(false)
 , m_count(0)
@@ -28,6 +29,7 @@ LDFile::LDFile(const std::string &cache_dir)
 , m_cacheSize(-1)
 , m_fh(false) // disable plugins
 , m_cache_dir(cache_dir)
+, m_log(log)
 {
     std::string pattern(cache_dir);
     if (pattern.empty())
@@ -68,7 +70,6 @@ LDFile::OpenResponseHandler::HandleResponseWithHosts(XrdCl::XRootDStatus *status
 void
 LDFile::SetSize(uint64_t size)
 {
-    m_is_open = true;
     m_size = size;
     m_cacheSize = (m_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
     m_present.resize(m_cacheSize, false);
@@ -103,7 +104,9 @@ XrdCl::XRootDStatus
 LDFile::Close(XrdCl::ResponseHandler *handler,
               uint16_t                timeout)
 {
-    m_is_open = false;
+    AtomicBeg(m_mutex);
+    AtomicCAS(m_is_open, true, false);
+    AtomicEnd(m_mutex);
     return m_fh.Close(handler, timeout);
 }
 
@@ -210,8 +213,7 @@ LDFile::VectorRead(const XrdCl::ChunkList &chunks,
     XrdCl::ChunkList *chunks_copy = new XrdCl::ChunkList(chunks);
     response->Set(chunks_copy);
     handler->HandleResponseWithHosts(cbstatus, response, NULL);
-    // TODO: figure out the right way to call back the handler.
-    return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errNotImplemented);
+    return XrdCl::XRootDStatus(XrdCl::stOK, XrdCl::suDone);
 }
 
 
@@ -235,6 +237,12 @@ LDFile::Visa(XrdCl::ResponseHandler *handler,
 bool
 LDFile::IsOpen() const
 {
+    // NOTE: According to C++11, this is undefined - but it effectively
+    // is OK on all known platforms.
+    // However, in C++03, we don't have sufficiently improved memory
+    // model to do the relaxed read.
+    //
+    // Further, we don't need any memory barriers here.
     return m_is_open;
 }
 
@@ -242,8 +250,11 @@ LDFile::IsOpen() const
 bool
 LDFile::UseCache() const
 {
+        // The atomic get below performs a full memory barrier, meaning
+        // the setting of m_cacheSize in ::SetSize and the resize of
+        // m_present have been completed.
     AtomicBeg(const_cast<LDFile*>(this)->m_mutex);
-    AtomicCAS(const_cast<LDFile*>(this)->m_is_open, false, true);
+    (void)AtomicGet(const_cast<LDFile*>(this)->m_is_open);
     AtomicEnd(const_cast<LDFile*>(this)->m_mutex);
     return ((m_fd != -1) && (m_cacheSize != -1));
 }
@@ -333,9 +344,10 @@ LDFile::cache(uint64_t start, uint64_t end, uint16_t timeout)
 }
 
 
-LDFileSystem::LDFileSystem(const XrdCl::URL &url)
+LDFileSystem::LDFileSystem(const XrdCl::URL &url, XrdCl::Log &log)
 :
 m_fs(url, false) // disable plugins
+, m_log(log)
 {}
 
 
@@ -507,10 +519,12 @@ LDFileSystem::GetProperty(const std::string &name,
 PlugInFactory::PlugInFactory(const std::map<std::string, std::string> &args)
 :
 m_min_free(2.0)
+, m_log(*XrdCl::DefaultEnv::GetLog())
 {
     m_dirs.reserve(2);
     m_dirs.push_back(".");
     m_dirs.push_back("$TMPDIR");
+
 
     std::map<std::string, std::string>::const_iterator it;
     if ((it = args.find("tempDir")) != args.end())
@@ -536,6 +550,22 @@ m_min_free(2.0)
         }
     }
 
+    if ((it = args.find("minSpace")) != args.end())
+    {
+        std::istringstream instream(it->second);
+        double min_free;
+        char test_end;
+        if ((instream >> min_free) && !instream.get(test_end))
+        {
+            m_min_free = min_free;
+        }
+        else
+        {
+            // TODO: Log invalid value.
+            // m_log.Error(XrdCl::AppMsg, "Invalid argument for minSpace: %s.", it->second.c_str());
+        }
+    }
+
     // At some point in the future, we would periodically re-evaluate
     // this decision.
     {
@@ -548,17 +578,15 @@ m_min_free(2.0)
 XrdCl::FilePlugIn *
 PlugInFactory::CreateFile(const std::string & url)
 {
-    //fprintf(stderr, "Creating new path for url %s.\n", url.c_str());
-    return static_cast<XrdCl::FilePlugIn *>(new LDFile(m_temp_path));
+    return static_cast<XrdCl::FilePlugIn *>(new LDFile(m_temp_path, m_log));
 }
 
 
 XrdCl::FileSystemPlugIn *
 PlugInFactory::CreateFileSystem(const std::string &url_str)
 {
-    //fprintf(stderr, "Creating new filesystem for url %s.\n", url_str.c_str());
     XrdCl::URL url(url_str);
-    return static_cast<XrdCl::FileSystemPlugIn *>(new LDFileSystem(url));
+    return static_cast<XrdCl::FileSystemPlugIn *>(new LDFileSystem(url, m_log));
 }
 
 
@@ -566,10 +594,8 @@ extern "C"
 {
 void *XrdClGetPlugIn(const void *arg)
 {
-    //fprintf(stderr, "Returning new plugin factory.\n");
     const std::map<std::string, std::string> &args = *static_cast<const std::map<std::string, std::string> *>(arg);
     void * myplugin = new XrdClLazyDownload::PlugInFactory(args);
-    //fprintf(stderr, "New factory plugin at %p.\n", myplugin);
 
     return myplugin;
 }

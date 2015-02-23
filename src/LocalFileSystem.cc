@@ -382,13 +382,13 @@ LocalFileSystem::findCachePath(const std::vector<std::string> &paths,
   struct stat s;
   struct statfs sfs;
 
-  fprintf(stderr, "Checking up to %d paths.\n", paths.size());
+  //fprintf(stderr, "Checking up to %d paths.\n", paths.size());
   for (size_t i = 0, e = paths.size(); i < e; ++i)
   {
     char *fullpath;
     const char *inpath = paths[i].c_str();
     const char *path = inpath;
-    fprintf(stderr, "Checking suitability of %s for cache.\n", path);
+    //fprintf(stderr, "Checking suitability of %s for cache.\n", path);
 
     if (*path == '$')
     {
