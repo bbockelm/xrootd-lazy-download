@@ -107,7 +107,16 @@ LDFile::Close(XrdCl::ResponseHandler *handler,
     AtomicBeg(m_mutex);
     AtomicCAS(m_is_open, true, false);
     AtomicEnd(m_mutex);
-    return m_fh.Close(handler, timeout);
+    if (m_fh.IsOpen()) {
+      return m_fh.Close(handler, timeout);
+    }
+    else
+    {
+      XrdCl::XRootDStatus *status = new XrdCl::XRootDStatus(XrdCl::stOK, XrdCl::suDone);
+      // is passing 0 as the response below safe? The standard handler doesn't use it, but a plugin might
+      handler->HandleResponseWithHosts(status, 0, 0);
+      return XrdCl::XRootDStatus(XrdCl::stOK, XrdCl::suDone);
+    }
 }
 
 
@@ -151,7 +160,7 @@ LDFile::Read(uint64_t                offset,
     }
     XrdCl::XRootDStatus *cbstatus = new XrdCl::XRootDStatus(XrdCl::stOK, XrdCl::suDone);
     XrdCl::AnyObject *response = new XrdCl::AnyObject();
-    XrdCl::ChunkInfo *info = new XrdCl::ChunkInfo(offset, size, buffer);
+    XrdCl::ChunkInfo *info = new XrdCl::ChunkInfo(offset, nread, buffer);
     response->Set(info);
     //fprintf(stderr, "Calling handler.\n");
     handler->HandleResponseWithHosts(cbstatus, response, NULL);
