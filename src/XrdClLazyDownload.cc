@@ -70,6 +70,7 @@ LDFile::OpenResponseHandler::HandleResponseWithHosts(XrdCl::XRootDStatus *status
 void
 LDFile::SetSize(uint64_t size)
 {
+    m_mutex.Lock();
     m_size = size;
     m_cacheSize = (m_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
     m_present.resize(m_cacheSize, false);
@@ -81,9 +82,8 @@ LDFile::SetSize(uint64_t size)
             m_fd = -1;
         }
     }
-    AtomicBeg(m_mutex);
-    AtomicCAS(m_is_open, false, true);
-    AtomicEnd(m_mutex);
+    m_is_open = true;
+    m_mutex.UnLock();
 }
 
 
@@ -104,10 +104,27 @@ XrdCl::XRootDStatus
 LDFile::Close(XrdCl::ResponseHandler *handler,
               uint16_t                timeout)
 {
-    AtomicBeg(m_mutex);
-    AtomicCAS(m_is_open, true, false);
-    AtomicEnd(m_mutex);
-    return m_fh.Close(handler, timeout);
+    XrdSysMutexHelper lock(m_mutex);
+    if (m_is_open)
+    {
+      m_is_open = false;
+      if (m_fh.IsOpen()) {
+        return m_fh.Close(handler, timeout);
+      }
+      else
+      {
+        lock.UnLock(); // since we're not touching m_fh, don't need this any more
+        XrdCl::XRootDStatus *status = new XrdCl::XRootDStatus(XrdCl::stOK, XrdCl::suDone);
+        // is passing 0 as the response below safe? The standard handler doesn't use it, but a plugin might
+        handler->HandleResponseWithHosts(status, 0, 0);
+        return XrdCl::XRootDStatus(XrdCl::stOK, XrdCl::suDone);
+      }
+    }
+    else
+    {
+      // This will return the correct error for closing an already closed file
+      return m_fh.Close(handler, timeout);
+    }
 }
 
 
@@ -151,7 +168,7 @@ LDFile::Read(uint64_t                offset,
     }
     XrdCl::XRootDStatus *cbstatus = new XrdCl::XRootDStatus(XrdCl::stOK, XrdCl::suDone);
     XrdCl::AnyObject *response = new XrdCl::AnyObject();
-    XrdCl::ChunkInfo *info = new XrdCl::ChunkInfo(offset, size, buffer);
+    XrdCl::ChunkInfo *info = new XrdCl::ChunkInfo(offset, nread, buffer);
     response->Set(info);
     //fprintf(stderr, "Calling handler.\n");
     handler->HandleResponseWithHosts(cbstatus, response, NULL);
@@ -250,13 +267,10 @@ LDFile::IsOpen() const
 bool
 LDFile::UseCache() const
 {
-        // The atomic get below performs a full memory barrier, meaning
-        // the setting of m_cacheSize in ::SetSize and the resize of
-        // m_present have been completed.
-    AtomicBeg(const_cast<LDFile*>(this)->m_mutex);
-    (void)AtomicGet(const_cast<LDFile*>(this)->m_is_open);
-    AtomicEnd(const_cast<LDFile*>(this)->m_mutex);
-    return ((m_fd != -1) && (m_cacheSize != -1));
+    const_cast<LDFile*>(this)->m_mutex.Lock();
+    bool use = ((m_fd != -1) && (m_cacheSize != -1));
+    const_cast<LDFile*>(this)->m_mutex.UnLock();
+    return use;
 }
 
 bool
@@ -292,10 +306,9 @@ LDFile::cache(uint64_t start, uint64_t end, uint16_t timeout)
         {
             len = m_size - start;
         }
-        bool is_present;
-        AtomicBeg(m_mutex);
-        is_present = AtomicGet(m_present[index]);
-        AtomicEnd(m_mutex);
+        m_mutex.Lock();
+        bool is_present = m_present[index];
+        m_mutex.UnLock();
             // Note it is possible for two threads to race and both cache
             // the chunk; since this is an idempotent operation (and only one
             // will update m_present below), this is OK.
@@ -327,15 +340,17 @@ LDFile::cache(uint64_t start, uint64_t end, uint16_t timeout)
             munmap(window, len);
             if (!status.IsOK()) {return status;}
 
-            AtomicBeg(m_mutex);
-            AtomicCAS(m_present[index], 0, 1);
-            int tmp_count;
-            AtomicFAdd(tmp_count, m_count, 1);
-            if (tmp_count+1 == m_cacheSize)
+            m_mutex.Lock();
+            if (m_present[index] != 1)
             {
-                m_fh.Close();
+              m_present[index] = 1;
+              ++m_count;
+              if (m_count == m_cacheSize)
+              {
+                  m_fh.Close();
+              }
             }
-            AtomicEnd(m_mutex);
+            m_mutex.UnLock();
         }
         start += len;
         ++index;
